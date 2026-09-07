@@ -1,0 +1,11 @@
+.git
+.gitignore
+.dockerignore
+docs
+workspace
+mcp-server/target
+mcp-server/.cargo-home
+*.md
+!README.md
+LICENSE
+compose.yaml

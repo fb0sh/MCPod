@@ -1,0 +1,13 @@
+# Build artifacts
+mcp-server/target/
+mcp-server/.cargo-home/
+
+# Local cargo home used for sandboxed builds
+.cargo-home/
+
+# OS noise
+.DS_Store
+
+# Project workspace content belongs to the user, not the repo
+workspace/*
+!workspace/AGENTS.md
