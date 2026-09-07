@@ -2,13 +2,12 @@
 //! head truncation (2000 lines / 50 KiB), giant-line notices, and image
 //! support (jpg/jpeg/png/gif/webp/bmp, downscaled to ≤2000×2000).
 
-use rmcp::model::{CallToolResult, ContentBlock};
-use serde_json::json;
+use crate::tools::ReadOutput;
 
 use crate::config::Config;
 use crate::fs::path::resolve_in_workspace;
 use crate::output::truncate::{self, MAX_BYTES, MAX_LINES};
-use crate::tools::{append_note, text_result};
+use crate::tools::append_note;
 
 /// Hard ceiling for a single read; larger files must go through bash.
 const MAX_READ_BYTES: u64 = 64 * 1024 * 1024;
@@ -21,7 +20,7 @@ pub async fn run(
     path: &str,
     offset: Option<u32>,
     limit: Option<u32>,
-) -> Result<CallToolResult, String> {
+) -> Result<ReadOutput, String> {
     let offset = offset.unwrap_or(1);
     if offset == 0 {
         return Err("Invalid offset: must be at least 1 (lines are 1-based)".to_string());
@@ -50,9 +49,17 @@ pub async fn run(
         .await
         .map_err(|e| format!("failed to read {path}: {e}"))?;
 
-    // Images (pi-spec §9): detected by content, returned as MCP image blocks.
-    if let Some(result) = try_image(path, &bytes)? {
-        return Ok(result);
+    // Images (pi-spec §9): detected by content; the caller attaches the MCP
+    // image block, the structured output describes it.
+    if let Some(mime) = detect_image_mime(&bytes)? {
+        return Ok(ReadOutput {
+            path: path.to_string(),
+            content: format!("Read image file [{mime}]"),
+            start_line: None,
+            end_line: None,
+            total_lines: None,
+            image_mime_type: Some(mime.to_string()),
+        });
     }
 
     if bytes[..bytes.len().min(BINARY_SNIFF_LEN)].contains(&0) {
@@ -61,7 +68,14 @@ pub async fn run(
     let content =
         String::from_utf8(bytes).map_err(|_| format!("{path} is not valid UTF-8 text"))?;
     if content.is_empty() {
-        return Ok(text_result("(file is empty)".to_string()));
+        return Ok(ReadOutput {
+            path: path.to_string(),
+            content: "(file is empty)".to_string(),
+            start_line: None,
+            end_line: None,
+            total_lines: Some(0),
+            image_mime_type: None,
+        });
     }
 
     // Line window (pi-spec §6).
@@ -94,12 +108,19 @@ pub async fn run(
         // The very first line of the window exceeds the byte budget: never
         // return half a line (pi-spec §7).
         let size = lines[start].len();
-        return Ok(text_result(format!(
-            "[Line {} is {}, exceeds {} limit.\nUse bash to inspect the line in chunks.]",
-            start + 1,
-            truncate::format_kb(size),
-            truncate::format_kb(MAX_BYTES)
-        )));
+        return Ok(ReadOutput {
+            path: path.to_string(),
+            content: format!(
+                "[Line {} is {}, exceeds {} limit.\nUse bash to inspect the line in chunks.]",
+                start + 1,
+                truncate::format_kb(size),
+                truncate::format_kb(MAX_BYTES)
+            ),
+            start_line: Some(start as u32 + 1),
+            end_line: Some(start as u32 + 1),
+            total_lines: Some(total as u32),
+            image_mime_type: None,
+        });
     }
 
     let mut text: String = kept.concat();
@@ -126,25 +147,39 @@ pub async fn run(
         };
         append_note(&mut text, note);
     }
-    Ok(text_result(text))
+    Ok(ReadOutput {
+        path: path.to_string(),
+        content: text,
+        start_line: Some(first as u32),
+        end_line: Some(last as u32),
+        total_lines: Some(total as u32),
+        image_mime_type: None,
+    })
 }
 
-/// Read an image file (pi-spec §9): detect by content, downscale to at most
-/// 2000×2000 (re-encoded as PNG), return as an MCP image content block.
-fn try_image(path: &str, bytes: &[u8]) -> Result<Option<CallToolResult>, String> {
+/// Detect whether the bytes are a supported image; returns the MIME type
+/// (post-downscale it is always re-encoded as PNG, pi-spec §9).
+fn detect_image_mime(bytes: &[u8]) -> Result<Option<&'static str>, String> {
     use image::ImageFormat;
     let Ok(format) = image::guess_format(bytes) else {
         return Ok(None);
     };
-    let mime = match format {
-        ImageFormat::Png => "image/png",
-        ImageFormat::Jpeg => "image/jpeg",
-        ImageFormat::Gif => "image/gif",
-        ImageFormat::WebP => "image/webp",
-        ImageFormat::Bmp => "image/bmp",
-        _ => return Ok(None),
-    };
+    Ok(match format {
+        ImageFormat::Png => Some("image/png"),
+        ImageFormat::Jpeg => Some("image/jpeg"),
+        ImageFormat::Gif => Some("image/gif"),
+        ImageFormat::WebP => Some("image/webp"),
+        ImageFormat::Bmp => Some("image/bmp"),
+        _ => None,
+    })
+}
 
+/// Load, downscale (≤2000×2000, aspect preserved), and base64-encode an
+/// image for the MCP image content block. Re-encodes as PNG when resized.
+pub fn encode_image_for_content(path: &str, bytes: &[u8]) -> Result<(String, &'static str), String> {
+    use image::ImageFormat;
+    let format = image::guess_format(bytes)
+        .map_err(|e| format!("failed to detect image {path}: {e}"))?;
     let img = image::load_from_memory_with_format(bytes, format)
         .map_err(|e| format!("failed to decode image {path}: {e}"))?;
     let (data, out_mime) = if img.width() > IMAGE_MAX_DIM || img.height() > IMAGE_MAX_DIM {
@@ -156,16 +191,19 @@ fn try_image(path: &str, bytes: &[u8]) -> Result<Option<CallToolResult>, String>
             .map_err(|e| format!("failed to re-encode image {path}: {e}"))?;
         (buffer, "image/png")
     } else {
+        let mime = match format {
+            ImageFormat::Png => "image/png",
+            ImageFormat::Jpeg => "image/jpeg",
+            ImageFormat::Gif => "image/gif",
+            ImageFormat::WebP => "image/webp",
+            ImageFormat::Bmp => "image/bmp",
+            _ => "image/png",
+        };
         (bytes.to_vec(), mime)
     };
-
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-    let _ = json!(null); // keep serde_json referenced for structured results elsewhere
-    Ok(Some(CallToolResult::success(vec![
-        ContentBlock::text(format!("Read image file [{out_mime}]")),
-        ContentBlock::image(encoded, out_mime),
-    ])))
+    Ok((encoded, out_mime))
 }
 
 #[cfg(test)]
@@ -179,11 +217,8 @@ mod tests {
 
     async fn read_text(dir: &std::path::Path, args: &str) -> Result<String, String> {
         let params: crate::tools::ReadParams = serde_json::from_str(args).unwrap();
-        let result = run(&config(dir), &params.path, params.offset, params.limit).await?;
-        Ok(match &result.content[0] {
-            rmcp::model::ContentBlock::Text(text) => text.text.clone(),
-            _ => panic!("expected text content"),
-        })
+        let output = run(&config(dir), &params.path, params.offset, params.limit).await?;
+        Ok(output.content)
     }
 
     #[tokio::test]
@@ -311,27 +346,27 @@ mod tests {
         buf
     }
 
-    async fn image_blocks(dir: &std::path::Path, name: &str) -> rmcp::model::CallToolResult {
+    async fn read_output(dir: &std::path::Path, name: &str) -> crate::tools::ReadOutput {
         run(&config(dir), name, None, None).await.unwrap()
     }
 
     #[tokio::test]
     async fn reads_png_image() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("pic.png"), encode_png(10, 12))
-            .await
-            .unwrap();
-        let result = image_blocks(dir.path(), "pic.png").await;
-        assert_eq!(result.is_error, Some(false));
-        assert_eq!(result.content.len(), 2);
-        let value = serde_json::to_value(&result.content).unwrap();
-        assert_eq!(value[0]["text"], "Read image file [image/png]");
-        assert_eq!(value[1]["type"], "image");
-        assert_eq!(value[1]["mimeType"], "image/png");
-        let data = &value[1]["data"].as_str().unwrap();
+        let png = encode_png(10, 12);
+        tokio::fs::write(dir.path().join("pic.png"), &png).await.unwrap();
+
+        // Structured output marks the file as an image.
+        let output = read_output(dir.path(), "pic.png").await;
+        assert_eq!(output.image_mime_type.as_deref(), Some("image/png"));
+        assert_eq!(output.content, "Read image file [image/png]");
+
+        // The image encoder round-trips the pixels.
+        let (encoded, mime) = encode_image_for_content("pic.png", &png).unwrap();
+        assert_eq!(mime, "image/png");
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(data)
+            .decode(encoded)
             .unwrap();
         let img = image::load_from_memory(&bytes).unwrap();
         assert_eq!((img.width(), img.height()), (10, 12));
@@ -339,16 +374,12 @@ mod tests {
 
     #[tokio::test]
     async fn downscales_oversized_image() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("big.png"), encode_png(3000, 1000))
-            .await
-            .unwrap();
-        let result = image_blocks(dir.path(), "big.png").await;
-        let value = serde_json::to_value(&result.content).unwrap();
-        assert_eq!(value[1]["mimeType"], "image/png");
+        let png = encode_png(3000, 1000);
+        let (encoded, mime) = encode_image_for_content("big.png", &png).unwrap();
+        assert_eq!(mime, "image/png"); // resized images re-encode as PNG
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(value[1]["data"].as_str().unwrap())
+            .decode(encoded)
             .unwrap();
         let img = image::load_from_memory(&bytes).unwrap();
         assert!(img.width() <= 2000 && img.height() <= 2000);
@@ -364,20 +395,18 @@ mod tests {
         jpeg_img
             .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
             .unwrap();
-        tokio::fs::write(dir.path().join("pic.jpg"), jpeg).await.unwrap();
-        let result = image_blocks(dir.path(), "pic.jpg").await;
-        let value = serde_json::to_value(&result.content).unwrap();
-        assert_eq!(value[0]["text"], "Read image file [image/jpeg]");
+        tokio::fs::write(dir.path().join("pic.jpg"), &jpeg).await.unwrap();
+        let output = read_output(dir.path(), "pic.jpg").await;
+        assert_eq!(output.image_mime_type.as_deref(), Some("image/jpeg"));
 
         let gif_img = image::DynamicImage::new_rgba8(4, 4);
         let mut gif = Vec::new();
         gif_img
             .write_to(&mut std::io::Cursor::new(&mut gif), image::ImageFormat::Gif)
             .unwrap();
-        tokio::fs::write(dir.path().join("anim.gif"), gif).await.unwrap();
-        let result = image_blocks(dir.path(), "anim.gif").await;
-        let value = serde_json::to_value(&result.content).unwrap();
-        assert_eq!(value[0]["text"], "Read image file [image/gif]");
+        tokio::fs::write(dir.path().join("anim.gif"), &gif).await.unwrap();
+        let output = read_output(dir.path(), "anim.gif").await;
+        assert_eq!(output.image_mime_type.as_deref(), Some("image/gif"));
     }
 
     #[tokio::test]

@@ -203,6 +203,19 @@ async fn tools_list_exposes_the_four_primitives_in_pi_order() {
     // bash schema has optional timeout
     let bash = result["tools"].as_array().unwrap().iter().find(|t| t["name"] == "bash").unwrap();
     assert!(bash["inputSchema"]["properties"]["timeout"].is_object());
+
+    // every tool advertises an outputSchema (structured output contract)
+    for tool in result["tools"].as_array().unwrap() {
+        let schema = &tool["outputSchema"];
+        assert!(schema.is_object(), "{} must expose outputSchema", tool["name"]);
+        assert_eq!(schema["type"], json!("object"));
+    }
+    let bash_schema = &result["tools"].as_array().unwrap().iter().find(|t| t["name"] == "bash").unwrap()["outputSchema"];
+    assert!(bash_schema["properties"]["exit_code"].is_object());
+    assert!(bash_schema["properties"]["stdout"].is_object());
+    let edit_schema = &result["tools"].as_array().unwrap().iter().find(|t| t["name"] == "edit").unwrap()["outputSchema"];
+    assert!(edit_schema["properties"]["diff"].is_object());
+    assert!(edit_schema["properties"]["firstChangedLine"].is_object());
 }
 
 #[tokio::test]
@@ -382,6 +395,9 @@ async fn write_creates_and_replaces_files() {
     assert_eq!(result["isError"], json!(false));
     let text = app.tool_text(&result);
     assert_eq!(text, "Successfully wrote 5 bytes to src/deep/nested/new.txt");
+    assert_eq!(result["structuredContent"]["bytes"], json!(5));
+    assert_eq!(result["structuredContent"]["path"], json!("src/deep/nested/new.txt"));
+    assert_eq!(result["structuredContent"]["success"], json!(true));
 
     let result = app.write_file_via_tool("src/deep/nested/new.txt", "second").await;
     assert_eq!(

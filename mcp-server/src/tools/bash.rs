@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rmcp::model::{CallToolResult, ContentBlock};
-use serde::Serialize;
 use tokio::io::AsyncReadExt;
+
+use crate::tools::BashOutput;
 
 use crate::output::truncate::{self, MAX_BYTES, MAX_LINES};
 use crate::process::process_group;
@@ -28,15 +28,6 @@ pub fn validate_timeout(timeout: Option<f64>) -> Result<Option<Duration>, String
     }
 }
 
-#[derive(Debug, Serialize)]
-struct BashStructured {
-    exit_code: i32,
-    stdout: String,
-    stderr: String,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    timed_out: bool,
-}
-
 struct Chunk {
     seq: u64,
     stderr: bool,
@@ -49,7 +40,7 @@ pub async fn run(
     workspace: &Path,
     command: &str,
     timeout: Option<Duration>,
-) -> Result<CallToolResult, String> {
+) -> Result<BashOutput, String> {
     let mut child = process_group::spawn_bash(command, workspace)
         .map_err(|e| format!("failed to spawn /bin/bash: {e}"))?;
     let (stdout_pipe, stderr_pipe) = child.take_pipes();
@@ -162,21 +153,14 @@ pub async fn run(
     let stdout_shown = stream_view(&String::from_utf8_lossy(&stdout_bytes));
     let stderr_shown = stream_view(&String::from_utf8_lossy(&stderr_bytes));
 
-    let is_error = exit_code != 0 || timed_out;
-    let structured = BashStructured {
+    Ok(BashOutput {
         exit_code,
+        output: text,
         stdout: stdout_shown,
         stderr: stderr_shown,
-        timed_out,
-    };
-    let mut result = if is_error {
-        CallToolResult::error(vec![ContentBlock::text(text)])
-    } else {
-        CallToolResult::success(vec![ContentBlock::text(text)])
-    };
-    result.structured_content =
-        Some(serde_json::to_value(&structured).expect("BashStructured serializes"));
-    Ok(result)
+        full_output_log: log_path,
+        timed_out: timed_out.then_some(true),
+    })
 }
 
 fn stream_view(full: &str) -> String {
@@ -190,7 +174,7 @@ fn stream_view(full: &str) -> String {
     }
 }
 
-fn format_seconds(seconds: f64) -> String {
+pub fn format_seconds(seconds: f64) -> String {
     if seconds.fract() == 0.0 {
         format!("{}", seconds as u64)
     } else {
@@ -235,15 +219,12 @@ mod tests {
         tempfile::tempdir().unwrap().keep().canonicalize().unwrap()
     }
 
-    fn text_of(result: &CallToolResult) -> String {
-        match &result.content[0] {
-            rmcp::model::ContentBlock::Text(text) => text.text.clone(),
-            _ => panic!("expected text"),
-        }
+    fn text_of(result: &BashOutput) -> String {
+        result.output.clone()
     }
 
-    fn structured(result: &CallToolResult) -> serde_json::Value {
-        result.structured_content.clone().unwrap()
+    fn structured(result: &BashOutput) -> serde_json::Value {
+        serde_json::to_value(result).unwrap()
     }
 
     #[test]
@@ -267,7 +248,7 @@ mod tests {
         let result = run(&ws(), "echo hello; echo oops >&2; exit 3", Some(Duration::from_secs(30)))
             .await
             .unwrap();
-        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.exit_code, 3);
         let structured = structured(&result);
         assert_eq!(structured["exit_code"], 3);
         assert_eq!(structured["stdout"].as_str().unwrap().trim(), "hello");
@@ -292,7 +273,7 @@ mod tests {
     #[tokio::test]
     async fn no_output_success() {
         let result = run(&ws(), "true", Some(Duration::from_secs(10))).await.unwrap();
-        assert_eq!(result.is_error, Some(false));
+        assert_eq!(result.exit_code, 0);
         assert_eq!(text_of(&result), "(no output)");
     }
 
@@ -300,7 +281,7 @@ mod tests {
     async fn no_output_failure_keeps_message() {
         let result = run(&ws(), "exit 7", Some(Duration::from_secs(10))).await.unwrap();
         assert_eq!(text_of(&result), "Command exited with code 7");
-        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.exit_code, 7);
     }
 
     #[tokio::test]
@@ -371,7 +352,7 @@ mod tests {
         .await
         .unwrap();
         assert!(started.elapsed().as_secs() < 30);
-        assert_eq!(result.is_error, Some(true));
+        assert!(result.timed_out == Some(true));
         let text = text_of(&result);
         assert!(text.contains("Command timed out after 1 seconds"));
         assert_eq!(structured(&result)["timed_out"], serde_json::json!(true));

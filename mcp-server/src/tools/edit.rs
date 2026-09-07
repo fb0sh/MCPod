@@ -4,8 +4,6 @@
 
 use std::ops::Range;
 
-use rmcp::model::{CallToolResult, ContentBlock};
-use serde_json::json;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::config::Config;
@@ -13,12 +11,12 @@ use crate::fs::atomic_write::write_atomic;
 use crate::fs::mutation_queue;
 use crate::fs::path::resolve_in_workspace;
 use crate::fs::text;
-use crate::tools::EditParams;
+use crate::tools::{EditOutput, EditParams};
 
 const BINARY_SNIFF_LEN: usize = 8192;
 const DIFF_CONTEXT_LINES: usize = 3;
 
-pub async fn run(config: &Config, params: &EditParams) -> Result<CallToolResult, String> {
+pub async fn run(config: &Config, params: &EditParams) -> Result<EditOutput, String> {
     let path = params.path.as_str();
     let edits = &params.edits;
     if edits.is_empty() {
@@ -111,18 +109,14 @@ pub async fn run(config: &Config, params: &EditParams) -> Result<CallToolResult,
         .await
         .map_err(|e| format!("failed to write {path}: {e}"))?;
 
-    let message = format!("Successfully replaced {} block(s) in {}.", edits.len(), path);
-    let structured = json!({
-        "success": true,
-        "path": path,
-        "replacements": edits.len(),
-        "firstChangedLine": first_changed_line,
-        "diff": diff_text,
-        "patch": patch,
-    });
-    let mut result = CallToolResult::success(vec![ContentBlock::text(message)]);
-    result.structured_content = Some(structured);
-    Ok(result)
+    Ok(EditOutput {
+        success: true,
+        path: path.to_string(),
+        replacements: edits.len(),
+        first_changed_line: first_changed_line.map(|line| line as u32),
+        diff: diff_text,
+        patch,
+    })
 }
 
 fn not_found_message(index: usize, path: &str, total: usize) -> String {
@@ -365,6 +359,7 @@ fn find_all_char_positions(haystack: &[char], needle: &[char]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use crate::tools::test_support::config;
     use crate::tools::{EditEntry, EditParams};
 
@@ -389,15 +384,8 @@ mod tests {
         tokio::fs::read_to_string(dir.join(name)).await.unwrap()
     }
 
-    fn structured(result: &CallToolResult) -> serde_json::Value {
-        result.structured_content.clone().unwrap()
-    }
-
-    fn text_of(result: &CallToolResult) -> String {
-        match &result.content[0] {
-            rmcp::model::ContentBlock::Text(text) => text.text.clone(),
-            _ => panic!("expected text"),
-        }
+    fn structured(result: &EditOutput) -> serde_json::Value {
+        serde_json::to_value(result).unwrap()
     }
 
     #[tokio::test]
@@ -407,10 +395,9 @@ mod tests {
         let result = run(&config(dir.path()), &params("f.rs", &[("todo!()", "unimplemented!()")]))
             .await
             .unwrap();
-        assert_eq!(
-            text_of(&result),
-            "Successfully replaced 1 block(s) in f.rs."
-        );
+        assert_eq!(result.replacements, 1);
+        assert!(result.diff.contains("-    todo!()"));
+        assert!(result.diff.contains("+    unimplemented!()"));
         assert_eq!(content_of(dir.path(), "f.rs").await, "fn main() {\n    unimplemented!()\n}\n");
 
         let structured = structured(&result);

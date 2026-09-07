@@ -6,10 +6,10 @@ use crate::config::Config;
 use crate::fs::atomic_write::write_atomic;
 use crate::fs::mutation_queue;
 use crate::fs::path::resolve_in_workspace;
-use crate::tools::{text_result, WriteParams};
-use rmcp::model::CallToolResult;
+use crate::tools::WriteOutput;
+use crate::tools::WriteParams;
 
-pub async fn run(config: &Config, params: &WriteParams) -> Result<CallToolResult, String> {
+pub async fn run(config: &Config, params: &WriteParams) -> Result<WriteOutput, String> {
     let resolved = resolve_in_workspace(&config.workspace, &params.path)?;
     // Whole mutation transaction under the per-file lock (§24): nothing can
     // interleave between resolve and the atomic rename.
@@ -24,11 +24,11 @@ pub async fn run(config: &Config, params: &WriteParams) -> Result<CallToolResult
         .await
         .map_err(|e| format!("failed to write {}: {e}", params.path))?;
 
-    Ok(text_result(format!(
-        "Successfully wrote {} bytes to {}",
-        params.content.len(),
-        params.path
-    )))
+    Ok(WriteOutput {
+        success: true,
+        path: params.path.clone(),
+        bytes: params.content.len(),
+    })
 }
 
 #[cfg(test)]
@@ -52,10 +52,9 @@ mod tests {
         let result = run(&config, &params("src/deep/nested/new.txt", "first"))
             .await
             .unwrap();
-        assert_eq!(
-            serde_json::to_value(&result.content).unwrap()[0]["text"],
-            "Successfully wrote 5 bytes to src/deep/nested/new.txt"
-        );
+        assert_eq!(result.bytes, 5);
+        assert_eq!(result.path, "src/deep/nested/new.txt");
+        assert!(result.success);
         assert_eq!(read_all(dir.path(), "src/deep/nested/new.txt").await, "first");
 
         run(&config, &params("src/deep/nested/new.txt", "second edition"))

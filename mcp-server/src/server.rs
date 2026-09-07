@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::auth;
 use crate::config::Config;
+use crate::tools::text_result;
 use crate::environment;
 use crate::instructions;
 use crate::tools;
@@ -44,17 +45,51 @@ impl McpodServer {
 /// the pi-spec §40 texts so agents get the same affordances as Pi.
 #[tool_router]
 impl McpodServer {
-    #[tool(description = "Read the contents of a file. Supports text files and images.\nText output is limited to the first 2000 lines or 50KB,\nwhichever is reached first. Use offset/limit to continue reading\nlarge files.")]
+    #[tool(
+        description = "Read the contents of a file. Supports text files and images.\nText output is limited to the first 2000 lines or 50KB,\nwhichever is reached first. Use offset/limit to continue reading\nlarge files.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<tools::ReadOutput>(),
+    )]
     async fn read(&self, params: Parameters<tools::ReadParams>) -> Result<CallToolResult, McpError> {
         let params = params.0;
         let config = self.config.clone();
-        run_tool("read", params.path.clone(), async move {
+        let output = match run_tool("read", params.path.clone(), async move {
             tools::read::run(&config, &params.path, params.offset, params.limit).await
         })
         .await
+        {
+            Ok(output) => output,
+            Err(message) => {
+                let McpError { message, .. } = message;
+                return Ok(tool_error(message.to_string()));
+            }
+        };
+        // Images ride along as an MCP image block next to the structured text.
+        if output.image_mime_type.is_some() {
+            let resolved = crate::fs::path::resolve_in_workspace(&self.config.workspace, &output.path)
+                .map_err(|e| McpError::invalid_params(e, None))?;
+            let bytes = tokio::fs::read(&resolved)
+                .await
+                .map_err(|e| McpError::internal_error(format!("failed to re-read image: {e}"), None))?;
+            let (encoded, mime) = tools::read::encode_image_for_content(&output.path, &bytes)
+                .map_err(|e| McpError::internal_error(e, None))?;
+            let mut result = CallToolResult::success(vec![
+                ContentBlock::text(output.content.clone()),
+                ContentBlock::image(encoded, mime),
+            ]);
+            result.structured_content =
+                Some(serde_json::to_value(&output).expect("ReadOutput serializes"));
+            return Ok(result);
+        }
+        let mut result = text_result(output.content.clone());
+        result.structured_content =
+            Some(serde_json::to_value(&output).expect("ReadOutput serializes"));
+        Ok(result)
     }
 
-    #[tool(description = "Execute a bash command in the current working directory.\nOutput is limited to the last 2000 lines or 50KB.\nWhen truncated, the complete output is saved to a temporary file.\nOptionally provide a timeout in seconds. There is no default timeout.")]
+    #[tool(
+        description = "Execute a bash command in the current working directory.\nOutput is limited to the last 2000 lines or 50KB.\nWhen truncated, the complete output is saved to a temporary file.\nOptionally provide a timeout in seconds. There is no default timeout.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<tools::BashOutput>(),
+    )]
     async fn bash(&self, params: Parameters<tools::BashParams>) -> Result<CallToolResult, McpError> {
         let params = params.0;
         let timeout = match tools::bash::validate_timeout(params.timeout) {
@@ -62,48 +97,102 @@ impl McpodServer {
             Err(message) => return Ok(CallToolResult::error(vec![ContentBlock::text(message)])),
         };
         let config = self.config.clone();
-        run_tool("bash", params.command.clone(), async move {
+        let output = match run_tool("bash", params.command.clone(), async move {
             tools::bash::run(&config.workspace, &params.command, timeout).await
         })
         .await
+        {
+            Ok(output) => output,
+            Err(message) => {
+                let McpError { message, .. } = message;
+                return Ok(tool_error(message.to_string()));
+            }
+        };
+        let is_error = output.exit_code != 0 || output.timed_out == Some(true);
+        let mut result = if is_error {
+            CallToolResult::error(vec![ContentBlock::text(output.output.clone())])
+        } else {
+            CallToolResult::success(vec![ContentBlock::text(output.output.clone())])
+        };
+        result.structured_content =
+            Some(serde_json::to_value(&output).expect("BashOutput serializes"));
+        Ok(result)
     }
 
-    #[tool(description = "Edit one file using targeted text replacements.\nEvery edits[].oldText must identify one unique, non-overlapping\nregion of the original file. Multiple disjoint edits can be\nperformed in one call.")]
+    #[tool(
+        description = "Edit one file using targeted text replacements.\nEvery edits[].oldText must identify one unique, non-overlapping\nregion of the original file. Multiple disjoint edits can be\nperformed in one call.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<tools::EditOutput>(),
+    )]
     async fn edit(&self, params: Parameters<tools::EditParams>) -> Result<CallToolResult, McpError> {
         let params = params.0;
         let config = self.config.clone();
-        run_tool("edit", params.path.clone(), async move {
+        let output = match run_tool("edit", params.path.clone(), async move {
             tools::edit::run(&config, &params).await
         })
         .await
+        {
+            Ok(output) => output,
+            Err(message) => {
+                let McpError { message, .. } = message;
+                return Ok(tool_error(message.to_string()));
+            }
+        };
+        let mut result = text_result(format!(
+            "Successfully replaced {} block(s) in {}.",
+            output.replacements, output.path
+        ));
+        result.structured_content =
+            Some(serde_json::to_value(&output).expect("EditOutput serializes"));
+        Ok(result)
     }
 
-    #[tool(description = "Write content to a file. Creates the file if it does not exist,\noverwrites it if it does, and automatically creates parent\ndirectories.")]
+    #[tool(
+        description = "Write content to a file. Creates the file if it does not exist,\noverwrites it if it does, and automatically creates parent\ndirectories.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<tools::WriteOutput>(),
+    )]
     async fn write(&self, params: Parameters<tools::WriteParams>) -> Result<CallToolResult, McpError> {
         let params = params.0;
         let config = self.config.clone();
-        run_tool("write", params.path.clone(), async move {
+        let output = match run_tool("write", params.path.clone(), async move {
             tools::write::run(&config, &params).await
         })
         .await
+        {
+            Ok(output) => output,
+            Err(message) => {
+                let McpError { message, .. } = message;
+                return Ok(tool_error(message.to_string()));
+            }
+        };
+        let mut result = text_result(format!(
+            "Successfully wrote {} bytes to {}",
+            output.bytes, output.path
+        ));
+        result.structured_content =
+            Some(serde_json::to_value(&output).expect("WriteOutput serializes"));
+        Ok(result)
     }
 }
 
 /// Shared wrapper: emit §30 tool logs and map tool outcomes to
 /// agent-friendly results (§39). Tool failures are results with
 /// `isError: true`, not protocol errors, so the message reaches the agent.
-async fn run_tool<F>(tool: &str, subject: String, run: F) -> Result<CallToolResult, McpError>
+/// Convert a tool-level error message into an isError result (§39).
+fn tool_error(message: String) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(message)])
+}
+
+async fn run_tool<T, F>(tool: &str, subject: String, run: F) -> Result<T, McpError>
 where
-    F: std::future::Future<Output = Result<CallToolResult, String>>,
+    T: serde::Serialize,
+    F: std::future::Future<Output = Result<T, String>>,
 {
     let started = Instant::now();
     tracing::info!(tool, subject = %log_clip(&subject), "tool called");
     match run.await {
         Ok(result) => {
-            let failed = result.is_error.unwrap_or(false);
             tracing::info!(
                 tool,
-                failed,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "tool completed"
             );
@@ -116,7 +205,9 @@ where
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "tool failed"
             );
-            Ok(CallToolResult::error(vec![ContentBlock::text(message)]))
+            // Tool-level failure: an isError result (not a protocol error) so
+            // the message reaches the agent's client (§39).
+            Err(McpError::internal_error(message, None))
         }
     }
 }

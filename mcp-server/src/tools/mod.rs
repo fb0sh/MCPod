@@ -12,6 +12,82 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+// ---------------------------------------------------------------------------
+// Output types (advertised via outputSchema so clients know the shape of
+// structuredContent before calling)
+// ---------------------------------------------------------------------------
+
+/// `bash` structured output: the command's execution result.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct BashOutput {
+    /// Process exit code; 124 means the command timed out.
+    pub exit_code: i32,
+    /// Merged stdout/stderr as shown to the agent: tail-truncated to the
+    /// last 2000 lines / 50 KiB, with the exit/tail note appended.
+    pub output: String,
+    /// Standard output (tail-truncated view).
+    pub stdout: String,
+    /// Standard error (tail-truncated view).
+    pub stderr: String,
+    /// Path to the complete output saved under /tmp when truncation occurred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_output_log: Option<String>,
+    /// Present (true) only when the command was killed for exceeding its timeout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timed_out: Option<bool>,
+}
+
+/// `edit` structured output: what changed and where.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EditOutput {
+    /// Always true on success.
+    pub success: bool,
+    /// The file that was edited.
+    pub path: String,
+    /// Number of replacements applied.
+    pub replacements: usize,
+    /// 1-based line number of the first changed line in the new file.
+    pub first_changed_line: Option<u32>,
+    /// Context diff of the changes (unified hunks).
+    pub diff: String,
+    /// Standard unified diff patch.
+    pub patch: String,
+}
+
+/// `write` structured output: confirmation of what was written.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteOutput {
+    /// Always true on success.
+    pub success: bool,
+    /// The file that was written.
+    pub path: String,
+    /// Number of bytes written.
+    pub bytes: usize,
+}
+
+/// `read` structured output: the requested file region.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadOutput {
+    /// The file that was read.
+    pub path: String,
+    /// The text content (subject to the 2000-line / 50KB head truncation).
+    pub content: String,
+    /// 1-based first line included in `content`.
+    pub start_line: Option<u32>,
+    /// 1-based last line included in `content`.
+    pub end_line: Option<u32>,
+    /// Total lines in the file, when known.
+    pub total_lines: Option<u32>,
+    /// Set when the file is an image; `content` then describes it and the
+    /// image block rides alongside as MCP image content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_mime_type: Option<String>,
+}
+
 
 
 #[derive(Debug, Deserialize, JsonSchema)]
