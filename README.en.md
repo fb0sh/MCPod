@@ -105,7 +105,7 @@ MCPod core, two transport adapters).
 | `MCPOD_PORT` | `3000` | HTTP listen port |
 | `MCPOD_WORKSPACE` | `/workspace` | Workspace root; file tools are jailed here |
 | `MCPOD_HOST` | `127.0.0.1` (`0.0.0.0` in the image) | Bind address |
-| `MCPOD_ALLOWED_HOSTS` | *(loopback defaults)* | Comma-separated `Host` header allowlist |
+| `MCPOD_ALLOWED_HOSTS` | *(unrestricted)* | Comma-separated `Host` header allowlist. Default: any Host is accepted (IP / domain / reverse proxy); set to restrict |
 | `MCPOD_ALLOWED_ORIGINS` | *(localhost defaults)* | `Origin` allowlist; defaults allow localhost/127.0.0.1/[::1] on any port |
 | `MCPOD_SSE_SESSION_TTL` | `30m` | How long a disconnected legacy SSE session lingers |
 | `MCPOD_SSE_KEEPALIVE` | `15s` | SSE `: keepalive` heartbeat interval |

@@ -95,7 +95,7 @@ URL:  http://localhost:3000/sse
 | `MCPOD_PORT` | `3000` | 监听端口 |
 | `MCPOD_WORKSPACE` | `/workspace` | 工作区根目录,文件工具被限制在内 |
 | `MCPOD_HOST` | `127.0.0.1`(镜像内 `0.0.0.0`) | 绑定地址 |
-| `MCPOD_ALLOWED_HOSTS` | *(回环默认)* | `Host` 头允许列表(逗号分隔) |
+| `MCPOD_ALLOWED_HOSTS` | *(不限制)* | `Host` 头白名单(逗号分隔)。默认不限制:IP/域名/反代均可访问;设置后仅放行列表内 Host |
 | `MCPOD_ALLOWED_ORIGINS` | *(localhost 系默认)* | `Origin` 允许列表;默认放行 localhost/127.0.0.1/[::1] 任意端口 |
 | `MCPOD_SSE_SESSION_TTL` | `30m` | 断开的 legacy SSE 会话保留时长 |
 | `MCPOD_SSE_KEEPALIVE` | `15s` | SSE `: keepalive` 心跳间隔 |

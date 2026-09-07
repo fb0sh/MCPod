@@ -254,6 +254,34 @@ async fn protocol_rejects_malformed_and_unknown_requests() {
 }
 
 #[tokio::test]
+async fn mcp_accepts_arbitrary_host_headers() {
+    // No MCPOD_ALLOWED_HOSTS configured: the server must be reachable via
+    // any Host (IP, domain, or proxy), not just localhost.
+    let app = spawn_app().await;
+    for host in ["203.0.113.10:3000", "mcpod.internal", "build.mycorp.io:8443"] {
+        let response = app
+            .client
+            .post(format!("{}/mcp", app.base_url))
+            .header("Host", host)
+            .header("Authorization", format!("Bearer {TOKEN}"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .json(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "t", "version": "0"},
+                },
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "Host {host} should be accepted");
+    }
+}
+
+#[tokio::test]
 async fn get_mcp_is_method_not_allowed_for_stateless_server() {
     let app = spawn_app().await;
     let response = app

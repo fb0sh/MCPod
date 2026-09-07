@@ -21,7 +21,12 @@ pub fn router(config: Arc<Config>, cancellation: CancellationToken) -> Router {
         .with_json_response(true)
         .with_sse_keep_alive(None)
         .with_cancellation_token(cancellation);
-    if !config.allowed_hosts.is_empty() {
+    if config.allowed_hosts.is_empty() {
+        // No restriction requested: accept any Host header so the server is
+        // reachable via IP, domain, or proxy out of the box. Set
+        // MCPOD_ALLOWED_HOSTS to opt back into an allowlist.
+        mcp_config = mcp_config.disable_allowed_hosts();
+    } else {
         mcp_config = mcp_config.with_allowed_hosts(config.allowed_hosts.clone());
     }
 
