@@ -95,16 +95,20 @@ jobs:
       - name: Package
         run: |
           set -euo pipefail
+          # Stage in a temp dir: the artifact must contain ONLY the tar.gz
+          # and its checksum. A bare `mcpod` binary in dist/ would collide
+          # between the two platform jobs when download-artifact merges
+          # them (last one wins) and leak into the release assets.
+          stage="$(mktemp -d)"
+          install -m 0755 "mcp-server/target/${{ matrix.target }}/release/mcpod" "$stage/mcpod"
           mkdir -p dist
-          install -m 0755 "mcp-server/target/${{ matrix.target }}/release/mcpod" dist/mcpod
-          cd dist
-          tar -czf "${{ matrix.artifact }}.tar.gz" mcpod
+          tar -czf "dist/${{ matrix.artifact }}.tar.gz" -C "$stage" mcpod
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256"
+            (cd dist && sha256sum "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256")
           else
-            shasum -a 256 "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256"
+            (cd dist && shasum -a 256 "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256")
           fi
-          ls -la
+          ls -la dist/
 
       - uses: actions/upload-artifact@v4
         with:
@@ -124,11 +128,22 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Sanitize release files
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          # Whitelist only the archives + checksums; anything else (e.g. a
+          # stray binary that slipped into an artifact) must not ship.
+          find dist -maxdepth 1 -type f \( -name 'mcpod-*.tar.gz' -o -name 'mcpod-*.tar.gz.sha256' \) \
+            -exec cp {} release/ \;
+          echo "release files:"; ls -la release/
+          [ "$(ls release | wc -l)" = "4" ]
+
       - name: List release files
-        run: ls -la dist/
+        run: ls -la release/
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: release/*
           fail_on_unmatched_files: true
           generate_release_notes: true
