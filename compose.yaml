@@ -1,6 +1,9 @@
 # MCPod compose (§23): localhost-only by default.
 # MCPOD_TOKEN is optional: unset/empty disables authentication (the server
 # logs a loud warning; use it only on trusted networks).
+# The entrypoint maps the `mcpod` user onto the workspace owner's UID/GID and
+# grants it passwordless sudo inside the container (see README "容器权限模型").
+# NOTE: no-new-privileges is intentionally absent — it would block sudo.
 services:
   mcpod:
     build: .
@@ -10,6 +13,4 @@ services:
       MCPOD_TOKEN: ${MCPOD_TOKEN:-}
     volumes:
       - ./workspace:/workspace
-    security_opt:
-      - no-new-privileges:true
     restart: unless-stopped

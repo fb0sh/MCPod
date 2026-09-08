@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # MCPod acceptance run (docs/plan.md §37 + pi-spec tool semantics).
 # Requires a running container at 127.0.0.1:3000 and MCPOD_TOKEN exported.
+# Sections 14-16 verify the permission model (scripts/docker-entrypoint.sh):
+# the mcpod user mapped onto the workspace owner, passwordless sudo, and
+# file-ownership preservation for write/edit/bash. Never assumes uid 1000.
+# Optional network round-trips: MCPOD_ACCEPTANCE_APT=1 (apt install),
+# MCPOD_ACCEPTANCE_MISE=1 (user-level mise install).
 set -euo pipefail
 
-BASE=http://127.0.0.1:3000
+BASE="${MCPOD_BASE:-http://127.0.0.1:3000}"
 AUTH="Authorization: Bearer ${MCPOD_TOKEN:?export MCPOD_TOKEN first}"
 JSON="Content-Type: application/json"
 ACCEPT="Accept: application/json, text/event-stream"
@@ -82,6 +87,9 @@ log=$(echo "$bash_out" | jq -r '.result.content[0].text' | grep -o '/tmp/mcpod-b
 # `docker compose up` (service: mcpod) and a plain `docker run` container.
 MCPod_CONTAINER="${MCPOD_CONTAINER:-$(docker compose ps -q mcpod 2>/dev/null || true)}"
 if [ -z "$MCPod_CONTAINER" ]; then
+  MCPod_CONTAINER=$(docker ps --filter name=mcpod --format '{{.ID}}' | head -1)
+fi
+if [ -z "$MCPod_CONTAINER" ]; then
   MCPod_CONTAINER=$(docker ps --filter ancestor=fb0sh/mcpod --format '{{.ID}}' | head -1)
 fi
 log_lines=$(docker exec "$MCPod_CONTAINER" sh -c "wc -l < '$log'" | tr -d ' \r')
@@ -132,6 +140,121 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/messages?sessionId=
 [ "$code" = "401" ]; check "unauthorized /messages -> 401" $?
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/messages?sessionId=00000000-0000-4000-8000-000000000000" -H "$AUTH" -H "$JSON" --data '{"jsonrpc":"2.0","id":9,"method":"ping"}')
 [ "$code" = "404" ]; check "unknown session -> 404" $?
+
+# 14. Permission model (scripts/docker-entrypoint.sh): the mcpod user is
+# remapped onto the workspace owner's uid/gid. Never assume 1000 — read the
+# real owner from the mounted workspace inside the container.
+ws_path="$(docker exec "$MCPod_CONTAINER" sh -c 'printf "%s" "${MCPOD_WORKSPACE:-/workspace}"' | tr -d '\r')"
+ws_owner="$(docker exec "$MCPod_CONTAINER" stat -c '%u:%g' "$ws_path" | tr -d '\r')"
+ws_uid="${ws_owner%%:*}"
+ws_gid="${ws_owner##*:}"
+[ -n "$ws_uid" ] && [ -n "$ws_gid" ]
+check "workspace owner resolved: $ws_path -> $ws_owner" $?
+
+mcp_bash() { # command -> raw JSON-RPC result of the bash tool
+  post "$(jq -nc --arg cmd "$1" '{jsonrpc:"2.0",id:99,method:"tools/call",params:{name:"bash",arguments:{command:$cmd}}}')"
+}
+bash_out()  { mcp_bash "$1" | jq -r '.result.structuredContent.stdout' | tr -d '\r'; }
+bash_code() { mcp_bash "$1" | jq -r '.result.structuredContent.exit_code' | tr -d '\r'; }
+
+id_lines="$(bash_out 'id -u; id -g; whoami; echo $HOME')"
+mcpod_uid="$(echo "$id_lines" | sed -n 1p)"
+mcpod_gid="$(echo "$id_lines" | sed -n 2p)"
+mcpod_user="$(echo "$id_lines" | sed -n 3p)"
+mcpod_home="$(echo "$id_lines" | sed -n 4p)"
+[ "$mcpod_uid" = "$ws_uid" ] && [ "$mcpod_gid" = "$ws_gid" ]
+check "bash identity uid/gid == workspace owner ($ws_uid:$ws_gid)" $?
+
+if [ "$ws_uid" != "0" ]; then
+  [ "$mcpod_user" = "mcpod" ]; check "bash whoami -> mcpod" $?
+  [ "$mcpod_home" = "/home/mcpod" ]; check "bash HOME -> /home/mcpod" $?
+  [ "$(bash_out 'sudo -n whoami')" = "root" ]; check "sudo -n whoami -> root" $?
+  [ "$(bash_code 'sudo -n true')" = "0" ]; check "sudo -n true exits 0 (no password)" $?
+else
+  # Root-owned workspace (e.g. Docker Desktop bind mounts): documented
+  # fallback — the server keeps running as root.
+  [ "$mcpod_user" = "root" ]; check "root-owned workspace: whoami -> root (fallback)" $?
+  [ "$(bash_code 'sudo -n true')" = "0" ]; check "sudo -n true exits 0 (as root)" $?
+fi
+
+# The MCP server process itself runs as the workspace owner, not root.
+proc_uid="$(docker exec "$MCPod_CONTAINER" sh -c "ps -o uid= -C mcpod | head -n1" | tr -d ' \r')"
+[ "$proc_uid" = "$ws_uid" ]; check "mcpod server process uid == $ws_uid" $?
+
+# sudo really grants container root on system locations.
+[ "$(bash_code 'sudo -n test -w /var/lib/apt/lists')" = "0" ]; check "sudo can write /var/lib/apt/lists" $?
+[ "$(bash_code 'sudo -n test -w /usr/local/bin')" = "0" ]; check "sudo can write /usr/local/bin" $?
+
+# Optional apt round-trip (needs network): MCPOD_ACCEPTANCE_APT=1
+if [ "${MCPOD_ACCEPTANCE_APT:-0}" = "1" ]; then
+  [ "$(bash_code 'sudo -n apt-get update -qq >/dev/null && sudo -n apt-get install -y --no-install-recommends shellcheck >/dev/null && shellcheck --version >/dev/null')" = "0" ]
+  check "sudo apt-get install shellcheck -> immediately usable" $?
+  mcp_bash 'sudo -n apt-get purge -y shellcheck >/dev/null 2>&1 || true' >/dev/null
+fi
+
+# 15. File ownership: every agent-created file keeps the workspace owner.
+# Container-side stat covers bind mounts (numeric uid is the host uid) and
+# named volumes alike; host-side stat is added when the source is a real dir.
+cstat() { docker exec "$MCPod_CONTAINER" stat -c '%u:%g' "$1" | tr -d '\r'; }
+
+post '{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"write","arguments":{"path":"ownership-write.txt","content":"mcpod ownership write"}}}' >/dev/null
+[ "$(cstat "$ws_path/ownership-write.txt")" = "$ws_owner" ]; check "write tool: new file owned by $ws_owner" $?
+
+bash_code 'printf "mcpod ownership edit me\n" > ownership-edit.txt' >/dev/null
+[ "$(cstat "$ws_path/ownership-edit.txt")" = "$ws_owner" ]; check "pre-edit file owned by $ws_owner" $?
+post '{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"edit","arguments":{"path":"ownership-edit.txt","edits":[{"oldText":"ownership","newText":"ownership-v2"}]}}}' >/dev/null
+[ "$(cstat "$ws_path/ownership-edit.txt")" = "$ws_owner" ]; check "edit atomic rename keeps owner $ws_owner" $?
+
+bash_code 'touch ownership-bash.txt && mkdir -p ownership-dir' >/dev/null
+[ "$(cstat "$ws_path/ownership-bash.txt")" = "$ws_owner" ]; check "bash touch keeps owner $ws_owner" $?
+[ "$(cstat "$ws_path/ownership-dir")" = "$ws_owner" ]; check "bash mkdir keeps owner $ws_owner" $?
+
+# Explicit sudo in the workspace creates root-owned files — expected Linux
+# semantics, proving sudo is genuinely elevated.
+if [ "$ws_uid" != "0" ]; then
+  bash_code 'sudo -n touch ownership-root.txt' >/dev/null
+  [ "$(cstat "$ws_path/ownership-root.txt")" = "0:0" ]; check "sudo touch -> root-owned (expected)" $?
+  bash_code 'sudo -n rm -f ownership-root.txt' >/dev/null
+fi
+
+# Host-side verification when the mount source is a real host directory.
+ws_src="$(docker inspect "$MCPod_CONTAINER" --format "{{range .Mounts}}{{if eq .Destination \"$ws_path\"}}{{.Source}}{{end}}{{end}}")"
+if [ -n "$ws_src" ] && [ -d "$ws_src" ]; then
+  host_owner() { # portable stat: GNU (-c) and BSD/macOS (-f)
+    if stat -c '%u:%g' "$1" >/dev/null 2>&1; then stat -c '%u:%g' "$1"
+    else stat -f '%u:%g' "$1"; fi
+  }
+  expected_host="$(host_owner "$ws_src")"
+  [ "$(host_owner "$ws_src/ownership-write.txt")" = "$expected_host" ]; check "host: write file owner == $expected_host" $?
+  [ "$(host_owner "$ws_src/ownership-edit.txt")" = "$expected_host" ]; check "host: edit file owner == $expected_host" $?
+  [ "$(host_owner "$ws_src/ownership-bash.txt")" = "$expected_host" ]; check "host: bash file owner == $expected_host" $?
+  [ "$(host_owner "$ws_src/ownership-dir")" = "$expected_host" ]; check "host: bash dir owner == $expected_host" $?
+fi
+
+# 16. HOME, git and mise compatibility for the dynamic identity.
+[ "$(bash_code 'mkdir -p ~/.ssh && touch ~/.ssh/config && test -f ~/.ssh/config')" = "0" ]; check "~/.ssh is writable" $?
+[ "$(bash_code 'touch "$HOME/.mcpod-acceptance" && rm "$HOME/.mcpod-acceptance"')" = "0" ]; check "HOME is writable" $?
+[ "$(bash_out 'python -c "import os; print(os.path.expanduser(\"~\"))"')" = "$mcpod_home" ]; check "python expanduser ~ -> $mcpod_home" $?
+
+bash_code 'git config --global user.name "MCPod Test" && git config --global user.email mcpod@example.invalid' >/dev/null
+[ "$(bash_out 'git config --global --get user.name')" = "MCPod Test" ]; check "git --global config writes \$HOME/.gitconfig" $?
+git_cmd='mkdir -p ownership-git && cd ownership-git && git init -q . && git config user.name "MCPod Test" && git config user.email mcpod@example.invalid && echo hello > a.txt && git add a.txt && git commit -qm "ownership test" && git status --porcelain'
+[ "$(bash_code "$git_cmd")" = "0" ]; check "git init/add/commit/status in workspace" $?
+
+[ "$(bash_code 'mise --version')" = "0" ]; check "mise --version as runtime user" $?
+[ "$(bash_code 'python --version && pip --version && ruff --version && pytest --version')" = "0" ]; check "python/pip/ruff/pytest resolve" $?
+[ "$(bash_code 'mise which python')" = "0" ]; check "mise resolves the preinstalled python" $?
+
+# Optional user-level mise install round-trip (needs network): MCPOD_ACCEPTANCE_MISE=1
+if [ "${MCPOD_ACCEPTANCE_MISE:-0}" = "1" ]; then
+  # `mise use -g` installs AND activates (config + shims), unlike bare install.
+  [ "$(bash_code 'mise use -g eza@latest >/dev/null 2>&1 && eza --version >/dev/null')" = "0" ]
+  check "mise use -g as unprivileged user -> immediately usable" $?
+  mcp_bash 'mise rm -g eza >/dev/null 2>&1 || true; mise uninstall eza@latest >/dev/null 2>&1 || true' >/dev/null
+fi
+
+# Cleanup ownership test artifacts (keep acceptance.txt like section 5-6 did).
+bash_code 'rm -rf ownership-write.txt ownership-edit.txt ownership-bash.txt ownership-dir ownership-git' >/dev/null
 
 echo
 echo "passed=$pass failed=$fail"

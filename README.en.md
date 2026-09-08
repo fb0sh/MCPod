@@ -62,12 +62,11 @@ docker run -d --name mcpod \
   -p 127.0.0.1:3000:3000 \
   -e MCPOD_TOKEN="$(openssl rand -hex 32)" \
   -v "$PWD/workspace:/workspace" \
-  --security-opt no-new-privileges \
   fb0sh/mcpod:latest
 ```
 
 Image: [hub.docker.com/r/fb0sh/mcpod](https://hub.docker.com/r/fb0sh/mcpod)
-(tags: `latest`, `1.0.0`)
+(tags: `latest`, `2.0.0`)
 
 ### Agent client configuration
 
@@ -116,6 +115,66 @@ MCPod core, two transport adapters).
 anyone who can reach the port controls the container, and the startup log
 says so loudly.
 
+## Container permissions
+
+The container entrypoint (`scripts/docker-entrypoint.sh`) sets up the
+identity model automatically — **zero configuration**:
+
+```text
+stat the owner UID/GID of $MCPOD_WORKSPACE (the bind-mounted project)
+        ↓
+remap the image's `mcpod` user/group onto that UID/GID (usermod/groupmod)
+        ↓
+prepare a writable /home/mcpod ($HOME: user-level mise state, .gitconfig, .ssh, ...)
+        ↓
+drop privileges with setpriv; the whole MCPod process tree runs as `mcpod`
+```
+
+Consequences:
+
+- **Correct file ownership**: files created by `read`/`write`/`edit`/`bash`
+  (including `edit`'s atomic rename) belong to the host workspace user. On
+  native Linux bind mounts, no more `root:root` files.
+- **No configuration needed**: no `PUID`/`PGID`/`UID`/`GID` variables, no
+  `--user`, no `chown -R`. `docker compose up -d` or
+  `docker run -v "$PWD/workspace:/workspace" ...` just works.
+- **Agents get passwordless sudo**: inside the container the agent is the
+  regular `mcpod` user, but can run `sudo apt-get install -y <pkg>` to
+  install system software — usable immediately, no restart.
+- **sudo ownership semantics**: an explicit `sudo touch /workspace/foo`
+  creates a root-owned file — standard Linux behavior; don't prefix ordinary
+  project commands with sudo.
+- **Stable writable HOME**: `$HOME=/home/mcpod` holds git/ssh/pip/mise user
+  state; the preinstalled mise runtimes (`/usr/local/share/mise`) are shared
+  read-only while `mise install` puts new runtimes into `$HOME`.
+- **UID/GID collision safe**: if the target UID/GID already exists in the
+  image, `usermod/groupmod -o` handles it; `sudo`, `getpwuid()`, and git all
+  keep working.
+
+Two special cases:
+
+- **Root-owned workspace** (e.g. Docker Desktop file sharing, root-owned
+  volumes): MCPod keeps running as root (the historical behavior). On
+  macOS/Windows Docker Desktop, host-side ownership is governed by the file
+  sharing layer, so the UID mapping is mostly relevant for native Linux.
+- **Custom `MCPOD_WORKSPACE`**: `docker run -e MCPOD_WORKSPACE=/project -v
+  "$PWD:/project" ...` works the same way — the entrypoint reads the owner
+  of `$MCPOD_WORKSPACE`.
+
+### Security boundary
+
+The MCP `bash` tool is arbitrary command execution by design; with
+passwordless sudo, **control of the MCPod endpoint ≈ root control of the
+container** (limited to the container itself and directories the user
+explicitly mounted into it). Be sure to:
+
+- set `MCPOD_TOKEN`, keep the default `127.0.0.1` port binding, and never
+  expose an unauthenticated endpoint to untrusted networks;
+- do not mount the Docker socket (`/var/run/docker.sock`), do not use
+  `--privileged`, and only mount host directories the agent truly needs;
+- for stricter isolation you can re-add `security_opt:
+  ["no-new-privileges:true"]` yourself — at the cost of losing sudo.
+
 ## Tool semantics
 
 - **read** — `{"path", "offset"?, "limit"?}`: 1-based line pagination, head
@@ -141,14 +200,16 @@ says so loudly.
 All file tools accept relative or workspace-absolute paths and are jailed to
 `MCPOD_WORKSPACE`: path traversal, sibling-prefix tricks (`/workspace-evil`),
 and symlink escapes are rejected by canonicalization. `bash` is a
-container-level capability — the Docker boundary (no `privileged`,
-`no-new-privileges`, localhost-only port binding) is the security boundary.
+container-level capability — the agent runs as `mcpod` and can become
+container root via sudo; the Docker boundary (no `privileged`, no Docker
+socket, localhost-only port binding) is the security boundary. See
+"Container permissions".
 
 ## Development
 
 ```bash
 cd mcp-server
-cargo test     # 126 tests: both transports, protocol, auth, tools, truncation, concurrency
+cargo test     # 127 tests: both transports, protocol, auth, tools, truncation, concurrency
 cargo clippy
 ```
 
@@ -165,10 +226,11 @@ scripts/acceptance.sh   # container acceptance: both transports + tool matrix
 
 ```
 MCPod/
-├── Dockerfile              # multi-stage: rust builder -> debian:13-slim
-├── compose.yaml            # localhost-only, no-new-privileges
+├── Dockerfile              # multi-stage: rust builder -> debian:13-slim (mcpod user + sudo)
+├── docker-entrypoint.sh    # under scripts/: workspace-owner mapping + privilege drop
+├── compose.yaml            # localhost-only binding
 ├── docs/structure.png      # architecture diagram
-├── scripts/acceptance.sh   # container acceptance script
+├── scripts/acceptance.sh   # container acceptance script (incl. ownership regression)
 ├── mcp-server/             # Rust MCP server (rmcp + axum + tokio)
 │   └── src/
 │       ├── transport/      # streamable_http (/mcp) + legacy_sse (/sse + /messages)

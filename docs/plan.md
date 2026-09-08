@@ -907,25 +907,24 @@ mcpod.toml
 
 32. 默认 Container 用户
 
-MVP 可以先使用：
+当前实现（v1.1+，scripts/docker-entrypoint.sh）：
 
-root
+镜像内创建 mcpod 用户（passwordless sudo）。
+容器启动时 entrypoint 读取 MCPOD_WORKSPACE 属主 UID/GID，
+把 mcpod 重映射到该身份后降权运行 MCP Server，
+使 bind mount 中产生的文件保持宿主属主。
 
-因为 MCPod 的目标是隔离开发容器。
+Agent 在容器内是普通用户，可通过 sudo 成为容器 root
+（安装系统软件等）；root 属主 workspace（如 Docker Desktop
+文件共享）回退为 root 运行。
 
-但 Docker 层面仍然应该：
+注意：因需要支持 sudo 提权，compose 不再设置
+no-new-privileges；安全边界仍是非 privileged、
+不挂 Docker socket、仅绑定 localhost（见 README）。
 
-no-new-privileges
-
-并避免：
+仍应避免：
 
 privileged
-
-后续可以支持：
-
-MCPOD_USER
-
-实现非 root 开发环境。
 
 33. 网络
 

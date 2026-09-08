@@ -54,11 +54,10 @@ docker run -d --name mcpod \
   -p 127.0.0.1:3000:3000 \
   -e MCPOD_TOKEN="$(openssl rand -hex 32)" \
   -v "$PWD/workspace:/workspace" \
-  --security-opt no-new-privileges \
   fb0sh/mcpod:latest
 ```
 
-镜像地址:[hub.docker.com/r/fb0sh/mcpod](https://hub.docker.com/r/fb0sh/mcpod)(标签:`latest`、`1.0.0`)
+镜像地址:[hub.docker.com/r/fb0sh/mcpod](https://hub.docker.com/r/fb0sh/mcpod)(标签:`latest`、`2.0.0`)
 
 ### Agent 客户端配置
 
@@ -102,6 +101,42 @@ URL:  http://localhost:3000/sse
 
 **鉴权**:设置 `MCPOD_TOKEN` 后,`POST /mcp`、`GET /sse`、`POST /messages` 都要求 `Authorization: Bearer <token>`,失败返回 401;`GET /health` 永远免鉴权。**不设置则不鉴权**,任何能访问端口的人都能控制容器——启动日志会明确打印此警告。
 
+## 容器权限模型
+
+MCPod 容器启动时由 entrypoint(`scripts/docker-entrypoint.sh`)自动完成身份映射,**零配置**:
+
+```text
+stat $MCPOD_WORKSPACE 的属主 UID/GID
+        ↓
+usermod/groupmod 把镜像内 mcpod 用户重映射到该 UID/GID
+        ↓
+准备可写的 /home/mcpod($HOME:mise 用户级状态、.gitconfig、.ssh……)
+        ↓
+setpriv 降权,整个 MCPod 进程树以 mcpod 身份运行
+```
+
+因此:
+
+- **文件 ownership 正确**:`read`/`write`/`edit`/`bash` 产生的文件(包括 `edit` 的原子 rename)都归属宿主 workspace 用户。Linux bind mount 下不会再出现 `root:root` 文件。
+- **无需任何配置**:不用设置 `PUID`/`PGID`/`UID`/`GID` 环境变量,不用 `--user`,不用 `chown -R`。`docker compose up -d` 或 `docker run -v "$PWD/workspace:/workspace" ...` 即可。
+- **Agent 有 passwordless sudo**:Agent 在容器内是普通用户 `mcpod`,但可以 `sudo apt-get install -y <pkg>` 安装系统软件,装完立即可用,无需重启。
+- **sudo 的 ownership 语义**:显式 `sudo touch /workspace/foo` 产生 root 属主文件——这是标准 Linux 行为,普通操作请不要加 sudo。
+- **HOME 稳定可写**:`$HOME=/home/mcpod`,git/ssh/pip/mise 等的用户级配置与缓存都落在这里;mise 预装 runtime(`/usr/local/share/mise`)只读共享,Agent 自己 `mise install` 的新 runtime 装入 `$HOME`。
+- **UID/GID 冲突安全**:目标 UID/GID 与镜像内已有用户/组冲突时用 `usermod/groupmod -o` 处理,`sudo`、`getpwuid()`、git 等均正常。
+
+两个特殊场景:
+
+- **root 属主的 workspace**(如 Docker Desktop 的文件共享挂载、root 属主 volume):MCPod 保持以 root 运行(即旧行为),Docker Desktop 下宿主文件属主由其文件共享层控制,macOS/Windows 上不必依赖此 UID 映射。
+- **自定义 `MCPOD_WORKSPACE`**:`docker run -e MCPOD_WORKSPACE=/project -v "$PWD:/project" ...` 同样生效,entrypoint 读取的是 `$MCPOD_WORKSPACE` 的属主。
+
+### 安全边界
+
+MCP 的 `bash` 本身就是任意命令执行能力;加上 passwordless sudo 后,**拿到 MCPod endpoint 控制权 ≈ 拿到该容器 root 控制权**(但仅限容器自身与用户显式挂载进容器的目录)。请务必:
+
+- 设置 `MCPOD_TOKEN`,保持默认 `127.0.0.1` 端口绑定,不要把未认证的 endpoint 暴露到不可信网络;
+- 不挂载 Docker socket(`/var/run/docker.sock`)、不使用 `--privileged`、不挂载 Agent 确实需要访问之外的宿主目录;
+- 需要更严格的隔离时,可自行加回 `security_opt: [no-new-privileges:true]`——代价是 Agent 失去 sudo 提权能力。
+
 ## 工具语义
 
 - **read** — `{"path", "offset"?, "limit"?}`:1 起始行号分页,头部截断于 2000 行 / 50 KiB,附 `Use offset=N to continue` 提示;图片(png/jpeg/gif/webp/bmp,按内容识别)以 MCP image block 返回,超过 2000px 等比缩小。
@@ -109,13 +144,13 @@ URL:  http://localhost:3000/sse
 - **edit** — `{"path", "edits": [{"oldText", "newText"}]}`:全部 `oldText` 对**原始文件**匹配、必须唯一、不得重叠;整单原子。保留 CRLF 与 UTF-8 BOM;智能引号/破折号等 Unicode 归一化回退提升匹配鲁棒性;成功返回 `firstChangedLine + diff + patch`。
 - **write** — `{"path", "content"}`:自动建父目录,原子替换。同一文件的并发写入经 per-file 队列串行。
 
-所有文件工具接受相对路径或工作区内绝对路径,并限制在 `MCPOD_WORKSPACE` 内:`../` 穿越、`/workspace-evil` 前缀、symlink 逃逸均被 canonicalize 拒绝。`bash` 是容器级能力——Docker 边界(非 privileged、no-new-privileges、仅绑定 localhost)就是安全边界。
+所有文件工具接受相对路径或工作区内绝对路径,并限制在 `MCPOD_WORKSPACE` 内:`../` 穿越、`/workspace-evil` 前缀、symlink 逃逸均被 canonicalize 拒绝。`bash` 是容器级能力——Agent 以 `mcpod` 用户运行并可通过 sudo 成为容器 root,Docker 边界(非 privileged、不挂 Docker socket、仅绑定 localhost)就是安全边界,详见「容器权限模型」。
 
 ## 开发
 
 ```bash
 cd mcp-server
-cargo test     # 126 个测试:双 transport、协议、鉴权、工具、截断、并发
+cargo test     # 127 个测试:双 transport、协议、鉴权、工具、截断、并发
 cargo clippy
 ```
 
@@ -129,10 +164,11 @@ scripts/acceptance.sh   # 容器验收:双 transport + 工具矩阵
 
 ```
 MCPod/
-├── Dockerfile              # 多阶段:rust builder -> debian:13-slim
-├── compose.yaml            # 仅 localhost, no-new-privileges
+├── Dockerfile              # 多阶段:rust builder -> debian:13-slim(mcpod 用户 + sudo)
+├── docker-entrypoint.sh    # scripts/:workspace 属主映射 + 降权(见「容器权限模型」)
+├── compose.yaml            # 仅 localhost 绑定
 ├── docs/structure.png      # 架构图
-├── scripts/acceptance.sh   # 容器验收脚本
+├── scripts/acceptance.sh   # 容器验收脚本(含 ownership 回归)
 ├── mcp-server/             # Rust MCP 服务器(rmcp + axum + tokio)
 │   └── src/
 │       ├── transport/      # streamable_http(/mcp)+ legacy_sse(/sse + /messages)

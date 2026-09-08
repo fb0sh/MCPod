@@ -37,12 +37,18 @@ Runtime:
 - Respect project-defined mise configuration when present.
 - Run `mise install` when the project declares runtimes that are not yet installed.
 
+Privileges:
+
+- You run as the `mcpod` user mapped onto the workspace owner's UID/GID, so files you create keep the host workspace ownership.
+- You have passwordless sudo inside the container for system-level operations.
+- Do not prefix ordinary project commands with sudo: files created via sudo are owned by root.
+
 Package installation:
 
 - The container is a disposable development environment.
-- You may install missing system packages with apt-get when required.
-- Prefer `apt-get install -y --no-install-recommends <package>`.
-- Run `apt-get update` when package metadata is unavailable or stale.
+- You may install missing system packages with sudo apt-get when required.
+- Prefer `sudo apt-get install -y --no-install-recommends <package>`.
+- Run `sudo apt-get update` when package metadata is unavailable or stale.
 - Prefer mise for development runtimes and runtime-managed tools.
 - Install project-specific system libraries only when required.
 
@@ -75,7 +81,10 @@ mod tests {
         assert!(instructions.contains("Use bash for `ls`, `rg`, `find`, git, package managers, builds, tests"));
         assert!(instructions.contains("Do not rely on temporary shell state such as `cd`, aliases"));
         assert!(instructions.contains("mise install"));
-        assert!(instructions.contains("apt-get install -y --no-install-recommends"));
+        assert!(instructions.contains("mapped onto the workspace owner's UID/GID"));
+        assert!(instructions.contains("passwordless sudo inside the container"));
+        assert!(instructions.contains("files created via sudo are owned by root"));
+        assert!(instructions.contains("sudo apt-get install -y --no-install-recommends"));
         assert!(instructions.contains("AGENTS.md exists, read it before modifying"));
         assert!(instructions.contains("Only mounted directories are guaranteed to persist"));
     }
