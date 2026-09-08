@@ -48,9 +48,18 @@ impl Config {
             Ok(value) => value.parse().context("invalid MCPOD_PORT")?,
             Err(_) => 3000,
         };
-        let workspace = std::env::var("MCPOD_WORKSPACE").unwrap_or_else(|_| "/workspace".into());
+        // Workspace default is the current directory (host mode: run `mcpod`
+        // from your project). The Docker image presets MCPOD_WORKSPACE=/workspace,
+        // so container behavior is unchanged. An explicitly set but empty
+        // value falls back to the default too.
+        let workspace = std::env::var("MCPOD_WORKSPACE")
+            .ok()
+            .map(|w| w.trim().to_string())
+            .filter(|w| !w.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(default_workspace);
         let workspace =
-            canonicalize_root(Path::new(&workspace)).context("invalid MCPOD_WORKSPACE")?;
+            canonicalize_root(&workspace).context("invalid MCPOD_WORKSPACE")?;
 
         let allowed_hosts = csv_env("MCPOD_ALLOWED_HOSTS");
         let allowed_origins = csv_env("MCPOD_ALLOWED_ORIGINS");
@@ -100,6 +109,13 @@ fn csv_env(name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Default workspace when MCPOD_WORKSPACE is unset/empty: the process's
+/// current directory (host mode). Inside the Docker image the env var is
+/// preset to /workspace by the Dockerfile, so this only affects host runs.
+fn default_workspace() -> PathBuf {
+    std::env::current_dir().expect("failed to determine the current directory")
+}
+
 /// Parse `Ns` / `Nm` / `Nh` (or bare seconds) into a Duration.
 fn duration_env(name: &str, default_secs: u64) -> Result<Duration> {
     let raw = match std::env::var(name) {
@@ -138,6 +154,14 @@ fn canonicalize_root(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_workspace_is_current_dir() {
+        // Host-mode default: the process cwd, not a hardcoded container path.
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(default_workspace(), cwd);
+        assert!(default_workspace().is_absolute());
+    }
 
     #[test]
     fn origin_default_allows_loopback_any_port() {

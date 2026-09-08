@@ -66,9 +66,11 @@ docker run -d --name mcpod \
 
 ```bash
 tar -xzf mcpod-macos-arm64.tar.gz
-MCPOD_TOKEN="$(openssl rand -hex 32)" MCPOD_WORKSPACE="$PWD" ./mcpod
-# -> mcpod server started addr=127.0.0.1:3000 workspace=...
+MCPOD_TOKEN="$(openssl rand -hex 32)" ./mcpod   # 在项目目录中运行
+# -> mcpod server started addr=127.0.0.1:3000 workspace=/path/to/当前目录
 ```
+
+**工作区默认就是当前目录**,无需设置 `MCPOD_WORKSPACE`(需指向其他目录时再显式指定);`./mcpod --help` 可查看全部环境变量。
 
 Linux 版为完全静态的 musl 二进制,可在任意 x86_64 发行版(含 Alpine/老旧 glibc)运行;macOS 版为 arm64。也可以从源码构建:`cd mcp-server && cargo build --release`。它与容器内运行的是同一个服务器,Agent 客户端配置完全相同。
 
@@ -107,7 +109,7 @@ URL:  http://localhost:3000/sse
 |----------|------|------|
 | `MCPOD_TOKEN` | *(未设置)* | Bearer Token。**未设置时关闭鉴权**(启动日志会打警告) |
 | `MCPOD_PORT` | `3000` | 监听端口 |
-| `MCPOD_WORKSPACE` | `/workspace` | 工作区根目录,文件工具被限制在内 |
+| `MCPOD_WORKSPACE` | 当前目录(镜像内 `/workspace`) | 工作区根目录,文件工具被限制在内 |
 | `MCPOD_HOST` | `127.0.0.1`(镜像内 `0.0.0.0`) | 绑定地址 |
 | `MCPOD_ALLOWED_HOSTS` | *(不限制)* | `Host` 头白名单(逗号分隔)。默认不限制:IP/域名/反代均可访问;设置后仅放行列表内 Host |
 | `MCPOD_ALLOWED_ORIGINS` | *(localhost 系默认)* | `Origin` 允许列表;默认放行 localhost/127.0.0.1/[::1] 任意端口 |

@@ -12,8 +12,51 @@ use tracing::info;
 use mcpod::config::Config;
 use mcpod::server;
 
+const HELP: &str = "\
+MCPod — MCP-controlled development server.
+
+Run `mcpod` from the directory the agent should work in; all configuration
+comes from environment variables (no CLI options):
+
+  MCPOD_TOKEN            Bearer token for /mcp, /sse and /messages.
+                         Unset/empty disables authentication (dangerous).
+  MCPOD_PORT             Listen port (default 3000).
+  MCPOD_HOST             Bind address (default 127.0.0.1; the Docker image
+                         sets 0.0.0.0 and relies on the port mapping).
+  MCPOD_WORKSPACE        Workspace root the file tools are jailed in.
+                         Default: the current directory (the Docker image
+                         presets /workspace).
+  MCPOD_ALLOWED_HOSTS    Comma-separated Host-header allowlist
+                         (default: unrestricted).
+  MCPOD_ALLOWED_ORIGINS  Browser Origin allowlist (default: localhost on
+                         any port).
+  MCPOD_SSE_SESSION_TTL  Disconnected legacy SSE session TTL (default 30m).
+  MCPOD_SSE_KEEPALIVE    SSE keepalive interval (default 15s).
+
+Example (host mode):
+
+  MCPOD_TOKEN=\"$(openssl rand -hex 32)\" ./mcpod
+
+Docs: https://github.com/fb0sh/MCPod
+";
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Minimal CLI surface: --help/--version only. Everything else is env
+    // config; unknown args are ignored to keep container entrypoints that
+    // pass extra "$@" harmless.
+    match std::env::args().nth(1).as_deref() {
+        Some("-h") | Some("--help") => {
+            print!("{HELP}");
+            return Ok(());
+        }
+        Some("-V") | Some("--version") => {
+            println!("mcpod {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        _ => {}
+    }
+
     // Logs go to stderr only (§30): stdout stays clean for the HTTP service.
     tracing_subscriber::fmt()
         .with_env_filter(

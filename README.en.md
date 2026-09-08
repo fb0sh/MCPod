@@ -77,9 +77,13 @@ checksum) and run it directly:
 
 ```bash
 tar -xzf mcpod-macos-arm64.tar.gz
-MCPOD_TOKEN="$(openssl rand -hex 32)" MCPOD_WORKSPACE="$PWD" ./mcpod
-# -> mcpod server started addr=127.0.0.1:3000 workspace=...
+MCPOD_TOKEN="$(openssl rand -hex 32)" ./mcpod   # run from your project dir
+# -> mcpod server started addr=127.0.0.1:3000 workspace=/path/to/cwd
 ```
+
+**The workspace defaults to the current directory** — no need to set
+`MCPOD_WORKSPACE` (set it only to point somewhere else); `./mcpod --help`
+lists every environment variable.
 
 The Linux build is a fully static musl binary that runs on any x86_64 distro
 (including Alpine and old-glibc systems); the macOS build is arm64. You can
@@ -126,7 +130,7 @@ MCPod core, two transport adapters).
 |----------|---------|-------------|
 | `MCPOD_TOKEN` | *(unset)* | Bearer token. **Unset disables authentication** (a warning is logged at startup) |
 | `MCPOD_PORT` | `3000` | HTTP listen port |
-| `MCPOD_WORKSPACE` | `/workspace` | Workspace root; file tools are jailed here |
+| `MCPOD_WORKSPACE` | current directory (`/workspace` in the image) | Workspace root; file tools are jailed here |
 | `MCPOD_HOST` | `127.0.0.1` (`0.0.0.0` in the image) | Bind address |
 | `MCPOD_ALLOWED_HOSTS` | *(unrestricted)* | Comma-separated `Host` header allowlist. Default: any Host is accepted (IP / domain / reverse proxy); set to restrict |
 | `MCPOD_ALLOWED_ORIGINS` | *(localhost defaults)* | `Origin` allowlist; defaults allow localhost/127.0.0.1/[::1] on any port |
