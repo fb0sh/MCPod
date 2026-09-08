@@ -59,6 +59,21 @@ docker run -d --name mcpod \
 
 镜像地址:[hub.docker.com/r/fb0sh/mcpod](https://hub.docker.com/r/fb0sh/mcpod)(标签:`latest`、`2.0.0`)
 
+### 方式三:主机直接运行(无 Docker)
+
+从 [GitHub Releases](https://github.com/fb0sh/MCPod/releases) 下载预编译的 `mcpod` 二进制
+(`mcpod-linux-x64.tar.gz`、`mcpod-macos-arm64.tar.gz`,附 `.sha256` 校验),解压即用:
+
+```bash
+tar -xzf mcpod-macos-arm64.tar.gz
+MCPOD_TOKEN="$(openssl rand -hex 32)" MCPOD_WORKSPACE="$PWD" ./mcpod
+# -> mcpod server started addr=127.0.0.1:3000 workspace=...
+```
+
+Linux 版为完全静态的 musl 二进制,可在任意 x86_64 发行版(含 Alpine/老旧 glibc)运行;macOS 版为 arm64。也可以从源码构建:`cd mcp-server && cargo build --release`。它与容器内运行的是同一个服务器,Agent 客户端配置完全相同。
+
+注意:主机模式下 `read/write/edit/bash` 直接操作主机文件系统,bash 以当前用户身份执行,没有 Docker 隔离边界——请仅在可信环境使用,并务必设置 `MCPOD_TOKEN`(默认只绑定 `127.0.0.1`)。
+
 ### Agent 客户端配置
 
 现代客户端(Streamable HTTP,推荐):
@@ -164,6 +179,7 @@ scripts/acceptance.sh   # 容器验收:双 transport + 工具矩阵
 
 ```
 MCPod/
+├── .github/workflows/     # CI:测试门禁 + 发布 mcpod 主机二进制(linux-x64 / macos-arm64)
 ├── Dockerfile              # 多阶段:rust builder -> debian:13-slim(mcpod 用户 + sudo)
 ├── docker-entrypoint.sh    # scripts/:workspace 属主映射 + 降权(见「容器权限模型」)
 ├── compose.yaml            # 仅 localhost 绑定

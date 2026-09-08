@@ -68,6 +68,30 @@ docker run -d --name mcpod \
 Image: [hub.docker.com/r/fb0sh/mcpod](https://hub.docker.com/r/fb0sh/mcpod)
 (tags: `latest`, `2.0.0`)
 
+### Option C: run on the host (no Docker)
+
+Download a prebuilt `mcpod` binary from
+[GitHub Releases](https://github.com/fb0sh/MCPod/releases)
+(`mcpod-linux-x64.tar.gz`, `mcpod-macos-arm64.tar.gz`, each with a `.sha256`
+checksum) and run it directly:
+
+```bash
+tar -xzf mcpod-macos-arm64.tar.gz
+MCPOD_TOKEN="$(openssl rand -hex 32)" MCPOD_WORKSPACE="$PWD" ./mcpod
+# -> mcpod server started addr=127.0.0.1:3000 workspace=...
+```
+
+The Linux build is a fully static musl binary that runs on any x86_64 distro
+(including Alpine and old-glibc systems); the macOS build is arm64. You can
+also build from source: `cd mcp-server && cargo build --release`. It is the
+same server that runs inside the container — agent client configuration is
+identical.
+
+Note: in host mode `read/write/edit/bash` operate directly on the host
+filesystem and bash runs as your current user — there is no Docker isolation
+boundary. Use it only in trusted environments, and always set `MCPOD_TOKEN`
+(it binds to `127.0.0.1` only by default).
+
 ### Agent client configuration
 
 Modern client (Streamable HTTP, recommended):
@@ -226,6 +250,7 @@ scripts/acceptance.sh   # container acceptance: both transports + tool matrix
 
 ```
 MCPod/
+├── .github/workflows/      # CI: test gate + mcpod host binaries (linux-x64 / macos-arm64)
 ├── Dockerfile              # multi-stage: rust builder -> debian:13-slim (mcpod user + sudo)
 ├── docker-entrypoint.sh    # under scripts/: workspace-owner mapping + privilege drop
 ├── compose.yaml            # localhost-only binding

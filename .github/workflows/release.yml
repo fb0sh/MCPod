@@ -1,0 +1,134 @@
+# Release pipeline: on a v* tag, run the test gate, then build host-native
+# `mcpod` binaries and attach them to the GitHub Release — so the MCP server
+# can also run directly on the host (no Docker container):
+#
+#   mcpod-linux-x64.tar.gz    x86_64-unknown-linux-musl (fully static)
+#   mcpod-macos-arm64.tar.gz  aarch64-apple-darwin (native)
+#
+# Each archive contains a single executable named `mcpod`, plus a .sha256
+# checksum next to it.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  # Quality gate: never publish binaries that fail tests or lint.
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: mcp-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mcp-server
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets
+
+      - name: cargo test
+        run: cargo test
+
+  build:
+    name: build ${{ matrix.artifact }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static musl binary: runs on any x86_64 Linux (glibc age / Alpine
+          # do not matter). musl-tools + cmake are needed for aws-lc-rs.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: mcpod-linux-x64
+          # Native arm64 build on an Apple Silicon runner.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: mcpod-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools cmake
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mcp-server
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        working-directory: mcp-server
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Smoke test the binary
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/mcpod-smoke-ws
+          MCPOD_PORT=3999 MCPOD_WORKSPACE=/tmp/mcpod-smoke-ws \
+            mcp-server/target/${{ matrix.target }}/release/mcpod >/tmp/mcpod-smoke.log 2>&1 &
+          pid=$!
+          sleep 2
+          curl -fsS http://127.0.0.1:3999/health
+          echo
+          kill $pid
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          install -m 0755 "mcp-server/target/${{ matrix.target }}/release/mcpod" dist/mcpod
+          cd dist
+          tar -czf "${{ matrix.artifact }}.tar.gz" mcpod
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256"
+          else
+            shasum -a 256 "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256"
+          fi
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Single upload step (avoids the two build jobs racing to create the
+  # release): collect both artifacts and attach everything at once.
+  publish:
+    name: publish github release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List release files
+        run: ls -la dist/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

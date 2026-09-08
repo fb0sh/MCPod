@@ -440,16 +440,20 @@ mod tests {
 
     #[tokio::test]
     async fn git_and_mise_versions() {
-        let result = run(&ws(), "git --version", Some(Duration::from_secs(30)))
-            .await
-            .unwrap();
-        assert_eq!(structured(&result)["exit_code"], 0);
-        // mise exists on the dev host via the user's toolchain, and in the
-        // container by design; tolerate absence on bare CI hosts.
-        let result = run(&ws(), "mise --version", Some(Duration::from_secs(30))).await;
-        match result {
-            Ok(result) => assert_eq!(structured(&result)["exit_code"], 0),
-            Err(message) => assert!(message.contains("failed to spawn"), "{message}"),
+        // git/mise exist on dev hosts and in the container by design, but a
+        // bare CI runner (e.g. a minimal rust image) may have neither — or a
+        // broken host shim that exits 127. Absent or broken is fine; present
+        // and failing otherwise is not.
+        for tool in ["git", "mise"] {
+            match run(&ws(), &format!("{tool} --version"), Some(Duration::from_secs(30))).await {
+                Ok(result) if structured(&result)["exit_code"] == 127 => continue,
+                Ok(result) => assert_eq!(
+                    structured(&result)["exit_code"],
+                    0,
+                    "{tool} is installed but failed to run"
+                ),
+                Err(message) => assert!(message.contains("failed to spawn"), "{message}"),
+            }
         }
     }
 }

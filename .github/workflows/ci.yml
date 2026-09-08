@@ -1,0 +1,35 @@
+# Continuous integration: lint + tests on every push to main and every PR.
+# Runs on both host platforms the release binaries target (linux x64,
+# macOS arm64), so platform regressions surface before a release tag.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: mcp-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mcp-server
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets
+
+      - name: cargo test
+        run: cargo test
